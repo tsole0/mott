@@ -173,7 +173,8 @@ fn compute_all_features(
         .collect();
 
     let w = bandwidth(cn, bond_lengths.clone())?;
-    let uw = uw_ratio(hubbard_u, w)?;
+    // Return NaN for U/W when Hubbard U is not available (hubbard_u == 0.0 used as sentinel)
+    let uw = if hubbard_u > 0.0 { hubbard_u / w } else { f64::NAN };
 
     // distortion — only if octahedral (cn == 6)
     let distortion = if bond_lengths.len() == 6 {
