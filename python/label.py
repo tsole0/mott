@@ -63,7 +63,7 @@ def label_data(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main() -> None:
-    df = pd.read_csv(INPUT_FILE)
+    df = pd.read_csv(INPUT_FILE, on_bad_lines="skip")
     df = label_data(df)
 
     n_lit   = df["is_mott"].sum()

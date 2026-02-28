@@ -226,7 +226,7 @@ def main() -> None:
 
     df = pd.DataFrame(features)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    df.to_csv(OUTPUT_FILE, index=False)
+    df.to_csv(OUTPUT_FILE, index=False, lineterminator="\n")
 
     n_with_uw = df["uw_ratio"].notna().sum()
     print(f"\nDone.")
