@@ -17,6 +17,7 @@ Usage:
 import os
 import sys
 import argparse
+from pathlib import Path
 from mp_api.client import MPRester
 from monty.serialization import dumpfn
 from monty.json import jsanitize
@@ -33,15 +34,12 @@ FIELDS = [
     "is_magnetic",
     "total_magnetization",
     "num_magnetic_sites",
-    # DFT metadata - golden signals
-    "is_hubbard",
-    "hubbard_u",
     # Structure
     "structure",
     "nsites",
     "volume",
     "density",
-    "crystal_system",
+    "symmetry",
     # Composition
     "nelements",
     # Stability
@@ -75,12 +73,10 @@ def query(api_key: str, chemsys: list = None, elements: list = None,
         else:
             kwargs["elements"] = TM_ELEMENTS
 
-        if max_results:
-            kwargs["num_chunks"] = 1
-            kwargs["chunk_size"] = max_results
-
         print(f"Querying Materials Project API...")
         docs = mpr.materials.summary.search(**kwargs)
+        if max_results:
+            docs = docs[:max_results]
         print(f"Retrieved {len(docs)} materials.")
 
         return [jsanitize(doc, with_data=True) for doc in docs]
@@ -111,6 +107,7 @@ def main():
 
     data = query(api_key, chemsys=chemsys, elements=elements, max_results=args.max)
 
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     dumpfn(data, args.output, indent=2)
 
     print(f"Saved {len(data)} materials to {args.output}")
