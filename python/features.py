@@ -43,6 +43,7 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 DATA_DIR     = PROJECT_ROOT / "data"
 INPUT_FILE   = DATA_DIR / "raw_materials.json"
 OUTPUT_FILE  = DATA_DIR / "features.csv"
+DOS_FILE     = DATA_DIR / "dos_widths.csv"
 
 # 3d/4d/5d TM elements where Mott physics is relevant
 TM_ELEMENTS = {
@@ -90,6 +91,23 @@ ANION_ELEMENTS: set[str] = {"O", "S", "N", "F", "Cl", "Se", "Br", "I"}
 # Skip BVAnalyzer for all other elements to avoid paying the spglib cost unnecessarily.
 OXI_SENSITIVE: set[str] = {"Mn", "Fe"}
 
+# Total valence electrons (d + s) for neutral TM atom.
+# d_count for M^(oxi_state)+ = TOTAL_VALENCE[el] - oxi_state
+# Verified: Ti3+→d1, Fe3+→d5, Ni2+→d8, Ir4+→d5 (the jeff=1/2 Mott state).
+TOTAL_VALENCE: dict[str, int] = {
+    "Ti": 4,  "V": 5,  "Cr": 6,  "Mn": 7,  "Fe": 8,  "Co": 9,  "Ni": 10, "Cu": 11,
+    "Nb": 5,  "Mo": 6, "Ru": 8,  "Rh": 9,
+    "Ta": 5,  "W": 6,  "Os": 8,  "Ir": 9,
+}
+
+# Most common oxidation state per TM element — fallback for d_count when BVAnalyzer
+# was not run (non-Mn/Fe materials) or failed.  Gives canonical d-count without extra cost.
+DEFAULT_OXI: dict[str, int] = {
+    "Ti": 4,  "V": 3,  "Cr": 3,  "Mn": 2,  "Fe": 3,  "Co": 2,  "Ni": 2,  "Cu": 2,
+    "Nb": 5,  "Mo": 4, "Ru": 4,  "Rh": 3,
+    "Ta": 5,  "W": 4,  "Os": 4,  "Ir": 4,
+}
+
 
 def _element_symbol(specie) -> str:
     return specie.element.symbol if hasattr(specie, "element") else specie.symbol
@@ -127,6 +145,7 @@ def extract_tm_features(mat: dict) -> dict | None:
             oxi_struct = None
 
     site_features = []
+    d_counts: list[float] = []
     for idx, site in enumerate(struct):
         el = _element_symbol(site.specie)
         if el not in TM_ELEMENTS:
@@ -142,6 +161,14 @@ def extract_tm_features(mat: dict) -> dict | None:
             u_val = float(OXI_HUBBARD_U[el].get(int(round(oxi_state)), hubbard_u.get(el, 0.0)))
         else:
             u_val = float(hubbard_u.get(el, 0.0))
+
+        # d-electron count: use BVAnalyzer oxi_state if available, else canonical DEFAULT_OXI.
+        # d_count = total_valence_electrons(neutral atom) − oxidation_state
+        eff_oxi = int(round(oxi_state)) if oxi_state is not None else DEFAULT_OXI.get(el)
+        if eff_oxi is not None and el in TOTAL_VALENCE:
+            d_count: float = float(max(0, min(10, TOTAL_VALENCE[el] - eff_oxi)))
+        else:
+            d_count = float("nan")
 
         site_coord = tuple(site.coords.tolist())
         neighbors = struct.get_neighbors(site, CUTOFF)
@@ -160,6 +187,7 @@ def extract_tm_features(mat: dict) -> dict | None:
             # U/W is NaN when u_val == 0.0
             feats = mott.compute_all_features(site_coord, neighbor_coords, u_val, CUTOFF)
             site_features.append(feats)
+            d_counts.append(d_count)
         except Exception:
             continue
 
@@ -176,6 +204,11 @@ def extract_tm_features(mat: dict) -> dict | None:
     valid_uw  = uw_vals[~np.isnan(uw_vals)]
     uw_mean   = float(valid_uw.mean()) if len(valid_uw) > 0 else float("nan")
 
+    d_arr = np.array(d_counts, dtype=float)
+    valid_d = d_arr[~np.isnan(d_arr)]
+    d_count_mean = float(valid_d.mean()) if len(valid_d) > 0 else float("nan")
+    d_count_std  = float(valid_d.std())  if len(valid_d) > 1 else 0.0
+
     return {
         "material_id":   mat["material_id"],
         "formula":       mat["formula_pretty"],
@@ -190,6 +223,8 @@ def extract_tm_features(mat: dict) -> dict | None:
         "distortion":        distortion_mean,
         "frac_octahedral":   frac_octahedral,
         "n_tm_sites":        len(site_features),
+        "d_count_mean":      d_count_mean,
+        "d_count_std":       d_count_std,
         # DFT scalars (from Materials Project)
         "total_magnetization":       float(mat.get("total_magnetization") or 0.0),
         "num_magnetic_sites":        int(mat.get("num_magnetic_sites") or 0),
@@ -225,6 +260,20 @@ def main() -> None:
                 features.append(result)
 
     df = pd.DataFrame(features)
+
+    # Merge DOS-derived d-band widths if query_dos.py has been run
+    if DOS_FILE.exists():
+        df_dos = pd.read_csv(DOS_FILE)
+        df = df.merge(df_dos[["material_id", "W_dft"]], on="material_id", how="left")
+        # U_eV = uw_ratio × bandwidth_W  (recovers eV from eV·Å² / Å⁻²)
+        # uw_ratio_dft = U_eV / W_dft   (dimensionless)
+        u_ev = df["uw_ratio"] * df["bandwidth_W"]
+        df["uw_ratio_dft"] = u_ev / df["W_dft"]
+        n_dft = df["uw_ratio_dft"].notna().sum()
+        print(f"  Merged DOS widths: {n_dft} materials have uw_ratio_dft")
+    else:
+        print(f"  [INFO] DOS widths not found ({DOS_FILE}). Run query_dos.py to add W_dft / uw_ratio_dft.")
+
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     df.to_csv(OUTPUT_FILE, index=False, lineterminator="\n")
 
@@ -235,7 +284,7 @@ def main() -> None:
     print(f"  {n_with_uw} have Hubbard U data (uw_ratio not NaN)")
     print(f"  {len(features) - n_with_uw} have uw_ratio=NaN (no U available)")
     print(f"\nPreview:")
-    print(df[["formula", "uw_ratio", "bandwidth_W", "coord_num", "distortion"]].head(10).to_string(index=False))
+    print(df[["formula", "uw_ratio", "bandwidth_W", "coord_num", "d_count_mean", "distortion"]].head(10).to_string(index=False))
 
 
 if __name__ == "__main__":
